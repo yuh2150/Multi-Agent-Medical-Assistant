@@ -88,6 +88,7 @@ class AgentConfig:
 class AgentState(MessagesState):
     """State maintained across the workflow."""
     # messages: List[BaseMessage]  # Conversation history
+    session_id: Optional[str]  # Session key for per-user memory isolation
     agent_name: Optional[str]  # Current active agent
     current_input: Optional[Union[str, Dict]]  # Input to be processed
     has_image: bool  # Whether the current input contains an image
@@ -542,8 +543,9 @@ def create_agent_graph():
             asyncio.set_event_loop(loop)
             
         try:
+            booking_session_id = state.get("session_id") or "global_web_chat"
             response_data = loop.run_until_complete(orchestrator.handle_message(
-                session_id="global_web_chat",
+                session_id=booking_session_id,
                 message=input_text
             ))
             reply = response_data.get("reply", "Đã xảy ra lỗi khi kết nối.")
@@ -682,8 +684,7 @@ def create_agent_graph():
             "BRAIN_TUMOR_AGENT": "BRAIN_TUMOR_AGENT",
             "CHEST_XRAY_AGENT": "CHEST_XRAY_AGENT",
             "SKIN_LESION_AGENT": "SKIN_LESION_AGENT",
-            "BOOKING_AGENT": "BOOKING_AGENT",
-            "needs_validation": "RAG_AGENT"  # Default to RAG if confidence is low
+            "BOOKING_AGENT": "BOOKING_AGENT"
         }
     )
     
@@ -719,6 +720,7 @@ def init_agent_state() -> AgentState:
     """Initialize the agent state with default values."""
     return {
         "messages": [],
+        "session_id": None,
         "agent_name": None,
         "current_input": None,
         "has_image": False,
@@ -774,6 +776,7 @@ def process_query(query: Union[str, Dict], conversation_history: List[BaseMessag
     state["messages"] = [HumanMessage(content=query)]
 
     thread_id = session_id or str(uuid.uuid4())
+    state["session_id"] = thread_id
     thread_config = {"configurable": {"thread_id": thread_id}}
 
     result = graph.invoke(state, thread_config)
