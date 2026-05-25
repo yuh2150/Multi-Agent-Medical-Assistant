@@ -2,11 +2,10 @@ import os
 import re
 import logging
 from uuid import uuid4
-from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 
 from langchain_core.documents import Document
-from langchain.storage import InMemoryStore, LocalFileStore
+from langchain_core.stores import InMemoryByteStore
 from langchain_qdrant import FastEmbedSparse, QdrantVectorStore, RetrievalMode
 from qdrant_client import QdrantClient, models
 from qdrant_client.http.models import Distance, SparseVectorParams, VectorParams, OptimizersConfigDiff
@@ -23,12 +22,15 @@ class VectorStore:
         self.embedding_model = config.rag.embedding_model
         self.retrieval_top_k = config.rag.top_k
         self.vector_search_type = config.rag.vector_search_type
-        self.vectorstore_local_path = config.rag.vector_local_path
-        self.docstore_local_path = config.rag.doc_local_path
 
-        # Use the singleton client instead of creating a new one
+        # Use Qdrant Cloud via URL + API key from config (env-backed)
+        self.qdrant_url = config.rag.url
+        self.qdrant_api_key = config.rag.api_key
+        if not self.qdrant_url or not self.qdrant_api_key:
+            raise ValueError("Missing QDRANT_URL or QDRANT_API_KEY for Qdrant Cloud")
+
         # self.client = QdrantClientManager.get_client(config)
-        self.client = QdrantClient(path=self.vectorstore_local_path)
+        self.client = QdrantClient(url=self.qdrant_url, api_key=self.qdrant_api_key)
 
     def _does_collection_exist(self) -> bool:
         """Check if the collection already exists in Qdrant."""
@@ -54,8 +56,7 @@ class VectorStore:
         except Exception as e:
             self.logger.error(f"Error creating collection: {e}")
             raise e
-            
-    def load_vectorstore(self) -> Tuple[QdrantVectorStore, LocalFileStore]:
+    def load_vectorstore(self) -> Tuple[QdrantVectorStore, InMemoryByteStore]:
         """
         Load existing vectorstore and docstore for retrieval operations without ingesting new documents.
         
@@ -81,8 +82,8 @@ class VectorStore:
             sparse_vector_name="sparse",
         )
         
-        # Document storage
-        docstore = LocalFileStore(self.docstore_local_path)
+        # Document storage (in-memory)
+        docstore = InMemoryByteStore()
         
         self.logger.info(f"Successfully loaded existing vectorstore and docstore")
         return qdrant_vectorstore, docstore
@@ -91,7 +92,7 @@ class VectorStore:
             self,
             document_chunks: List[str],
             document_path: str,
-        ) -> Tuple[QdrantVectorStore, LocalFileStore, List[str]]:
+            ) -> Tuple[QdrantVectorStore, InMemoryByteStore, List[str]]:
         """
         Create a vector store from document chunks or upsert documents to existing store.
         
@@ -115,8 +116,7 @@ class VectorStore:
                     metadata={
                         "source": os.path.basename(document_path),
                         "doc_id": doc_ids[id_idx],
-                        # "source_path": Path(os.path.abspath(document_path)).as_uri()
-                        "source_path": os.path.join("http://localhost:8000/", document_path)
+                        "source_path": document_path
                     }
                 )
             )
@@ -143,8 +143,8 @@ class VectorStore:
             sparse_vector_name="sparse",
         )
         
-        # Document storage for parent documents
-        docstore = LocalFileStore(self.docstore_local_path)
+        # Document storage for parent documents (in-memory)
+        docstore = InMemoryByteStore()
         
         # Ingest documents into vector and doc stores
         qdrant_vectorstore.add_documents(documents=langchain_documents, ids=doc_ids)
@@ -157,7 +157,7 @@ class VectorStore:
             self,
             query: str,
             vectorstore: QdrantVectorStore,
-            docstore: LocalFileStore,
+            docstore: InMemoryByteStore,
         ) -> Tuple[List[Dict[str, Any]], List[str]]:
         """
         Retrieve relevant chunks based on a query.

@@ -18,7 +18,7 @@ import os, getpass
 from dotenv import load_dotenv
 from agents.rag_agent import MedicalRAG
 from agents.web_search_processor_agent import WebSearchProcessorAgent
-from agents.image_analysis_agent import ImageAnalysisAgent
+from agents.image_analysis_agent.skin_lesion_agent.skin_lesion_inference import SkinLesionClassifier
 from agents.guardrails.local_guardrails import LocalGuardrails
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -62,10 +62,14 @@ class AgentConfig:
     1. CONVERSATION_AGENT - For general chat, greetings, and non-medical questions.
     2. RAG_AGENT - For specific medical knowledge questions that can be answered from established medical literature. Currently ingested medical knowledge involves 'introduction to brain tumor', 'deep learning techniques to diagnose and detect brain tumors', 'deep learning techniques to diagnose and detect covid / covid-19 from chest x-ray'.
     3. WEB_SEARCH_PROCESSOR_AGENT - For questions about recent medical developments, current outbreaks, or time-sensitive medical information.
+<<<<<<< Updated upstream
     4. BRAIN_TUMOR_AGENT - For analysis of brain MRI images to detect and segment tumors.
     5. CHEST_XRAY_AGENT - For analysis of chest X-ray images to detect abnormalities.
     6. SKIN_LESION_AGENT - For analysis of skin lesion images to classify them as benign or malignant.
     7. BOOKING_AGENT - For medical appointment booking, searching for doctors, checking doctor available slots, and appointment cancellations.
+=======
+    4. SKIN_LESION_AGENT - For analysis of skin lesion images to classify them as benign or malignant.
+>>>>>>> Stashed changes
 
     Make your decision based on these guidelines:
     - If the user wants to book an appointment, check doctor available slots, search for doctors, or cancel an appointment, route to the BOOKING_AGENT.
@@ -82,7 +86,7 @@ class AgentConfig:
     }}
     """
 
-    image_analyzer = ImageAnalysisAgent(config=config)
+    skin_lesion_classifier = SkinLesionClassifier()
 
 
 class AgentState(MessagesState):
@@ -156,13 +160,9 @@ def create_agent_graph():
                     "bypass_routing": True  # flag to end flow
                 }
         
-        # Original image processing code
         if isinstance(current_input, dict) and "image" in current_input:
             has_image = True
-            image_path = current_input.get("image", None)
-            image_type_response = AgentConfig.image_analyzer.analyze_image(image_path)
-            image_type = image_type_response['image_type']
-            print("ANALYZED IMAGE TYPE: ", image_type)
+            image_type = "SKIN_LESION"
         
         return {
             **state,
@@ -179,50 +179,14 @@ def create_agent_graph():
     
     def route_to_agent(state: AgentState) -> Dict:
         """Make decision about which agent should handle the query."""
-        messages = state["messages"]
-        current_input = state["current_input"]
         has_image = state["has_image"]
-        image_type = state["image_type"]
-        
-        # Prepare input for decision model
-        input_text = ""
-        if isinstance(current_input, str):
-            input_text = current_input
-        elif isinstance(current_input, dict):
-            input_text = current_input.get("text", "")
-        
-        # Create context from recent conversation history (last 3 messages)
-        recent_context = ""
-        for msg in messages[-6:]:  # Get last 3 exchanges (6 messages)  # Not provided control from config
-            if isinstance(msg, HumanMessage):
-                recent_context += f"User: {msg.content}\n"
-            elif isinstance(msg, AIMessage):
-                recent_context += f"Assistant: {msg.content}\n"
-        
-        # Combine everything for the decision input
-        decision_input = f"""
-        User query: {input_text}
 
-        Recent conversation context:
-        {recent_context}
-
-        Has image: {has_image}
-        Image type: {image_type if has_image else 'None'}
-
-        Based on this information, which agent should handle this query?
-        """
-        
-        # Make the decision
-        decision = decision_chain.invoke({"input": decision_input})
-
-        # Decided agent
-        print(f"Decision: {decision['agent']}")
-        
-        # Update state with decision
+        next_agent = "SKIN_LESION_AGENT" if has_image else "CONVERSATION_AGENT"
         updated_state = {
             **state,
-            "agent_name": decision["agent"],
+            "agent_name": next_agent,
         }
+<<<<<<< Updated upstream
         
         # Keep the model's selected agent even when confidence is lower.
         # The confidence score is preserved in state so we can inspect or surface it later,
@@ -238,6 +202,10 @@ def create_agent_graph():
             }
         
         return {"agent_state": updated_state, "next": decision["agent"]}
+=======
+
+        return {"agent_state": updated_state, "next": next_agent}
+>>>>>>> Stashed changes
 
     # Define agent execution functions (these will be implemented in their respective modules)
     def run_conversation_agent(state: AgentState) -> AgentState:
@@ -455,46 +423,6 @@ def create_agent_graph():
             return "WEB_SEARCH_PROCESSOR_AGENT"  # Correct format
         return "check_validation"  # No transition needed if confidence is high and info is sufficient
     
-    def run_brain_tumor_agent(state: AgentState) -> AgentState:
-        """Handle brain MRI image analysis."""
-
-        print(f"Selected agent: BRAIN_TUMOR_AGENT")
-
-        response = AIMessage(content="This would be handled by the brain tumor agent, analyzing the MRI image.")
-
-        return {
-            **state,
-            "output": response,
-            "needs_human_validation": True,  # Medical diagnosis always needs validation
-            "agent_name": "BRAIN_TUMOR_AGENT"
-        }
-    
-    def run_chest_xray_agent(state: AgentState) -> AgentState:
-        """Handle chest X-ray image analysis."""
-
-        current_input = state["current_input"]
-        image_path = current_input.get("image", None)
-
-        print(f"Selected agent: CHEST_XRAY_AGENT")
-
-        # classify chest x-ray into covid or normal
-        predicted_class = AgentConfig.image_analyzer.classify_chest_xray(image_path)
-
-        if predicted_class == "covid19":
-            response = AIMessage(content="The analysis of the uploaded chest X-ray image indicates a **POSITIVE** result for **COVID-19**.")
-        elif predicted_class == "normal":
-            response = AIMessage(content="The analysis of the uploaded chest X-ray image indicates a **NEGATIVE** result for **COVID-19**, i.e., **NORMAL**.")
-        else:
-            response = AIMessage(content="The uploaded image is not clear enough to make a diagnosis / the image is not a medical image.")
-
-        # response = AIMessage(content="This would be handled by the chest X-ray agent, analyzing the image.")
-
-        return {
-            **state,
-            "output": response,
-            "needs_human_validation": True,  # Medical diagnosis always needs validation
-            "agent_name": "CHEST_XRAY_AGENT"
-        }
     
     def run_skin_lesion_agent(state: AgentState) -> AgentState:
         """Handle skin lesion image analysis."""
@@ -504,13 +432,13 @@ def create_agent_graph():
 
         print(f"Selected agent: SKIN_LESION_AGENT")
 
-        # classify chest x-ray into covid or normal
-        predicted_mask = AgentConfig.image_analyzer.segment_skin_lesion(image_path)
-
-        if predicted_mask:
-            response = AIMessage(content="Following is the analyzed **segmented** output of the uploaded skin lesion image:")
-        else:
-            response = AIMessage(content="The uploaded image is not clear enough to make a diagnosis / the image is not a medical image.")
+        label, confidence = AgentConfig.skin_lesion_classifier.predict(image_path)
+        response = AIMessage(
+            content=(
+                f"Skin lesion classification result: **{label}**\n"
+                f"Confidence: **{confidence:.4f}**"
+            )
+        )
 
         # response = AIMessage(content="This would be handled by the skin lesion agent, analyzing the skin image.")
 
@@ -652,8 +580,6 @@ def create_agent_graph():
     workflow.add_node("CONVERSATION_AGENT", run_conversation_agent)
     workflow.add_node("RAG_AGENT", run_rag_agent)
     workflow.add_node("WEB_SEARCH_PROCESSOR_AGENT", run_web_search_processor_agent)
-    workflow.add_node("BRAIN_TUMOR_AGENT", run_brain_tumor_agent)
-    workflow.add_node("CHEST_XRAY_AGENT", run_chest_xray_agent)
     workflow.add_node("SKIN_LESION_AGENT", run_skin_lesion_agent)
     workflow.add_node("BOOKING_AGENT", run_booking_agent)
     workflow.add_node("check_validation", handle_human_validation)
@@ -681,8 +607,6 @@ def create_agent_graph():
             "CONVERSATION_AGENT": "CONVERSATION_AGENT",
             "RAG_AGENT": "RAG_AGENT",
             "WEB_SEARCH_PROCESSOR_AGENT": "WEB_SEARCH_PROCESSOR_AGENT",
-            "BRAIN_TUMOR_AGENT": "BRAIN_TUMOR_AGENT",
-            "CHEST_XRAY_AGENT": "CHEST_XRAY_AGENT",
             "SKIN_LESION_AGENT": "SKIN_LESION_AGENT",
             "BOOKING_AGENT": "BOOKING_AGENT"
         }
@@ -693,8 +617,6 @@ def create_agent_graph():
     # workflow.add_edge("RAG_AGENT", "check_validation")
     workflow.add_edge("WEB_SEARCH_PROCESSOR_AGENT", "check_validation")
     workflow.add_conditional_edges("RAG_AGENT", confidence_based_routing)
-    workflow.add_edge("BRAIN_TUMOR_AGENT", "check_validation")
-    workflow.add_edge("CHEST_XRAY_AGENT", "check_validation")
     workflow.add_edge("SKIN_LESION_AGENT", "check_validation")
     workflow.add_edge("BOOKING_AGENT", "check_validation")
 

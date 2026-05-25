@@ -18,13 +18,10 @@ flowchart TD
     %% Medical Decision Branch
     AssistantChatbot --> MedicalAgentDecision[Medical Agent Decision]
     MedicalAgentDecision --> SkinLesion[Skin Lesion]
-    MedicalAgentDecision --> BrainTumor[Brain Tumor]
-    MedicalAgentDecision --> ChestXray[Chest X-ray]
+    %% Removed Brain Tumor and Chest X-ray agents
     
     %% Validation
     SkinLesion --> HumanValidation[Human-in-the-loop Validation]
-    BrainTumor --> HumanValidation
-    ChestXray --> HumanValidation
 
     %%Test
     HumanValidation --> AssistantChatbot
@@ -64,7 +61,7 @@ flowchart TD
     class UserInput,SpeechInput,TextInput,ImageUpload,LLMConversation,TextOutput,SpeechOutput output
     class AssistantChatbot chatbot
     class MedicalAgentDecision decision
-    class SkinLesion,BrainTumor,ChestXray medical
+    class SkinLesion medical
     class HumanValidation validation
     class RAGAgent agent
     class WebSearchAgent search

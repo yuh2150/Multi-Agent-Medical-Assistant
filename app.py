@@ -90,7 +90,11 @@ class AIChatRequest(BaseModel):
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     """Serve the main HTML page"""
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={}
+    )
 
 @app.get("/health")
 def health_check():
@@ -356,59 +360,42 @@ async def transcribe_audio(audio: UploadFile = File(...)):
 
 @app.post("/generate-speech")
 async def generate_speech(request: SpeechRequest):
-    """Endpoint to generate speech using ElevenLabs API"""
+    """Generate speech using ElevenLabs SDK"""
+
     try:
-        text = request.text
-        selected_voice_id = request.voice_id
         
-        if not text:
-            return JSONResponse(
+        if not request.text.strip():
+            raise HTTPException(
                 status_code=400,
-                content={"error": "Text is required"}
+                detail="Text is required"
             )
-        
-        # Define API request to ElevenLabs
-        elevenlabs_url = f"https://api.elevenlabs.io/v1/text-to-speech/{selected_voice_id}/stream"
-        headers = {
-            "Accept": "audio/mpeg",
-            "Content-Type": "application/json",
-            "xi-api-key": config.speech.eleven_labs_api_key
-        }
-        payload = {
-            "text": text,
-            "model_id": "eleven_monolingual_v1",
-            "voice_settings": {
+
+        audio_stream = client.text_to_speech.convert(
+            text=request.text,
+            voice_id=request.voice_id,
+            model_id="eleven_multilingual_v2",
+            output_format="mp3_44100_128",
+            voice_settings={
                 "stability": 0.5,
-                "similarity_boost": 0.5
+                "similarity_boost": 0.75
             }
-        }
+        )
 
-        # Send request to ElevenLabs API
-        response = requests.post(elevenlabs_url, headers=headers, json=payload)
+        audio_bytes = b"".join(audio_stream)
 
-        if response.status_code != 200:
-            return JSONResponse(
-                status_code=500,
-                content={"error": f"Failed to generate speech, status: {response.status_code}", "details": response.text}
-            )
-        
-        # Save the audio file temporarily
-        os.makedirs(SPEECH_DIR, exist_ok=True)
-        temp_audio_path = f"./{SPEECH_DIR}/{uuid.uuid4()}.mp3"
-        with open(temp_audio_path, "wb") as f:
-            f.write(response.content)
-
-        # Return the generated audio file
-        return FileResponse(
-            path=temp_audio_path,
+        return StreamingResponse(
+            io.BytesIO(audio_bytes),
             media_type="audio/mpeg",
-            filename="generated_speech.mp3"
+            headers={
+                "Content-Disposition": "inline; filename=speech.mp3"
+            }
         )
 
     except Exception as e:
-        return JSONResponse(
+        
+        raise HTTPException(
             status_code=500,
-            content={"error": str(e)}
+            detail=str(e)
         )
 
 # Add exception handler for request entity too large
