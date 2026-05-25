@@ -6,6 +6,8 @@ It dynamically routes user queries to the appropriate agent based on content and
 """
 
 import json
+import uuid
+from functools import lru_cache
 from typing import Dict, List, Optional, Any, Literal, TypedDict, Union, Annotated
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 from langchain_core.prompts import ChatPromptTemplate
@@ -31,11 +33,11 @@ load_dotenv()
 # Load configuration
 config = Config()
 
-# Initialize memory
+# Initialize shared, read-only agent components once.
 memory = MemorySaver()
-
-# Specify a thread
-thread_config = {"configurable": {"thread_id": "1"}}
+guardrails = LocalGuardrails(config.rag.llm)
+rag_agent = MedicalRAG(config)
+web_search_processor_agent = WebSearchProcessorAgent(config)
 
 
 # Agent that takes the decision of routing the request further to correct task specific agent
@@ -63,13 +65,14 @@ class AgentConfig:
     4. BRAIN_TUMOR_AGENT - For analysis of brain MRI images to detect and segment tumors.
     5. CHEST_XRAY_AGENT - For analysis of chest X-ray images to detect abnormalities.
     6. SKIN_LESION_AGENT - For analysis of skin lesion images to classify them as benign or malignant.
+    7. BOOKING_AGENT - For medical appointment booking, searching for doctors, checking doctor available slots, and appointment cancellations.
 
     Make your decision based on these guidelines:
-    - If the user has not uploaded any image, always route to the conversation agent.
-    - If the user uploads a medical image, decide which medical vision agent is appropriate based on the image type and the user's query. If the image is uploaded without a query, always route to the correct medical vision agent based on the image type.
-    - If the user asks about recent medical developments or current health situations, use the web search pocessor agent.
-    - If the user asks specific medical knowledge questions, use the RAG agent.
-    - For general conversation, greetings, or non-medical questions, use the conversation agent. But if image is uploaded, always go to the medical vision agents first.
+    - If the user wants to book an appointment, check doctor available slots, search for doctors, or cancel an appointment, route to the BOOKING_AGENT.
+    - If the user has not uploaded any image and is asking about general conversation, greetings, or non-medical topics, use the CONVERSATION_AGENT.
+    - If the user uploads a medical image, decide which medical vision agent is appropriate based on the image type.
+    - If the user asks about recent medical developments or current health situations, use the WEB_SEARCH_PROCESSOR_AGENT.
+    - If the user asks specific medical knowledge questions, use the RAG_AGENT.
 
     You must provide your answer in JSON format with the following structure:
     {{
@@ -92,8 +95,10 @@ class AgentState(MessagesState):
     output: Optional[str]  # Final output to user
     needs_human_validation: bool  # Whether human validation is required
     retrieval_confidence: float  # Confidence in retrieval (for RAG agent)
+    routing_confidence: float  # Confidence in the routing decision
     bypass_routing: bool  # Flag to bypass agent routing for guardrails
     insufficient_info: bool  # Flag indicating RAG response has insufficient information
+    routing_needs_review: bool  # Flag indicating the router was not fully confident
 
 
 class AgentDecision(TypedDict):
@@ -105,9 +110,6 @@ class AgentDecision(TypedDict):
 
 def create_agent_graph():
     """Create and configure the LangGraph for agent orchestration."""
-
-    # Initialize guardrails with the same LLM used elsewhere
-    guardrails = LocalGuardrails(config.rag.llm)
 
     # LLM
     decision_model = config.agent_decision.llm
@@ -221,9 +223,18 @@ def create_agent_graph():
             "agent_name": decision["agent"],
         }
         
-        # Route based on agent name and confidence
+        # Keep the model's selected agent even when confidence is lower.
+        # The confidence score is preserved in state so we can inspect or surface it later,
+        # but we avoid rerouting low-confidence cases into an unrelated fallback agent.
         if decision["confidence"] < AgentConfig.CONFIDENCE_THRESHOLD:
-            return {"agent_state": updated_state, "next": "needs_validation"}
+            return {
+                "agent_state": {
+                    **updated_state,
+                    "routing_confidence": decision["confidence"],
+                    "routing_needs_review": True,
+                },
+                "next": decision["agent"],
+            }
         
         return {"agent_state": updated_state, "next": decision["agent"]}
 
@@ -326,8 +337,6 @@ def create_agent_graph():
         # Initialize the RAG agent
 
         print(f"Selected agent: RAG_AGENT")
-
-        rag_agent = MedicalRAG(config)
         
         messages = state["messages"]
         query = state["current_input"]
@@ -414,9 +423,7 @@ def create_agent_graph():
                 # print("######### DEBUG 2:", msg)
                 recent_context += f"Assistant: {msg.content}\n"
 
-        web_search_processor = WebSearchProcessorAgent(config)
-
-        processed_response = web_search_processor.process_web_search_results(query=state["current_input"], chat_history=recent_context)
+        processed_response = web_search_processor_agent.process_web_search_results(query=state["current_input"], chat_history=recent_context)
 
         # print("######### DEBUG WEB SEARCH:", processed_response)
         
@@ -511,6 +518,44 @@ def create_agent_graph():
             "output": response,
             "needs_human_validation": True,  # Medical diagnosis always needs validation
             "agent_name": "SKIN_LESION_AGENT"
+        }
+    
+    def run_booking_agent(state: AgentState) -> AgentState:
+        """Handle appointment booking queries."""
+        print("Selected agent: BOOKING_AGENT")
+        current_input = state["current_input"]
+        input_text = ""
+        if isinstance(current_input, str):
+            input_text = current_input
+        elif isinstance(current_input, dict):
+            input_text = current_input.get("text", "")
+            
+        import asyncio
+        import nest_asyncio
+        from agents.booking_agent import orchestrator
+        
+        nest_asyncio.apply()
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+        try:
+            response_data = loop.run_until_complete(orchestrator.handle_message(
+                session_id="global_web_chat",
+                message=input_text
+            ))
+            reply = response_data.get("reply", "Đã xảy ra lỗi khi kết nối.")
+        except Exception as e:
+            print(f"Error executing booking agent: {e}")
+            reply = f"Rất tiếc, đã xảy ra sự cố khi thực hiện đặt lịch khám: {str(e)}."
+            
+        response = AIMessage(content=reply)
+        return {
+            **state,
+            "output": response,
+            "agent_name": "BOOKING_AGENT"
         }
     
     def handle_human_validation(state: AgentState) -> Dict:
@@ -608,6 +653,7 @@ def create_agent_graph():
     workflow.add_node("BRAIN_TUMOR_AGENT", run_brain_tumor_agent)
     workflow.add_node("CHEST_XRAY_AGENT", run_chest_xray_agent)
     workflow.add_node("SKIN_LESION_AGENT", run_skin_lesion_agent)
+    workflow.add_node("BOOKING_AGENT", run_booking_agent)
     workflow.add_node("check_validation", handle_human_validation)
     workflow.add_node("human_validation", perform_human_validation)
     workflow.add_node("apply_guardrails", apply_output_guardrails)
@@ -636,6 +682,7 @@ def create_agent_graph():
             "BRAIN_TUMOR_AGENT": "BRAIN_TUMOR_AGENT",
             "CHEST_XRAY_AGENT": "CHEST_XRAY_AGENT",
             "SKIN_LESION_AGENT": "SKIN_LESION_AGENT",
+            "BOOKING_AGENT": "BOOKING_AGENT",
             "needs_validation": "RAG_AGENT"  # Default to RAG if confidence is low
         }
     )
@@ -648,6 +695,7 @@ def create_agent_graph():
     workflow.add_edge("BRAIN_TUMOR_AGENT", "check_validation")
     workflow.add_edge("CHEST_XRAY_AGENT", "check_validation")
     workflow.add_edge("SKIN_LESION_AGENT", "check_validation")
+    workflow.add_edge("BOOKING_AGENT", "check_validation")
 
     workflow.add_edge("human_validation", "apply_guardrails")
     workflow.add_edge("apply_guardrails", END)
@@ -678,12 +726,20 @@ def init_agent_state() -> AgentState:
         "output": None,
         "needs_human_validation": False,
         "retrieval_confidence": 0.0,
+        "routing_confidence": 0.0,
         "bypass_routing": False,
-        "insufficient_info": False
+        "insufficient_info": False,
+        "routing_needs_review": False
     }
 
 
-def process_query(query: Union[str, Dict], conversation_history: List[BaseMessage] = None) -> str:
+@lru_cache(maxsize=1)
+def _get_compiled_graph():
+    """Compile the agent graph once and reuse it across requests."""
+    return create_agent_graph()
+
+
+def process_query(query: Union[str, Dict], conversation_history: List[BaseMessage] = None, session_id: Optional[str] = None) -> str:
     """
     Process a user query through the agent decision system.
     
@@ -695,7 +751,7 @@ def process_query(query: Union[str, Dict], conversation_history: List[BaseMessag
         Response from the appropriate agent
     """
     # Initialize the graph
-    graph = create_agent_graph()
+    graph = _get_compiled_graph()
 
     # # Save Graph Flowchart
     # image_bytes = graph.get_graph().draw_mermaid_png()
@@ -717,7 +773,9 @@ def process_query(query: Union[str, Dict], conversation_history: List[BaseMessag
     
     state["messages"] = [HumanMessage(content=query)]
 
-    # result = graph.invoke(state, thread_config)
+    thread_id = session_id or str(uuid.uuid4())
+    thread_config = {"configurable": {"thread_id": thread_id}}
+
     result = graph.invoke(state, thread_config)
     # print("######### DEBUG 4:", result)
     # state["messages"] = [result["messages"][-1].content]

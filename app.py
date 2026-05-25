@@ -21,6 +21,8 @@ from elevenlabs.client import ElevenLabs
 
 from config import Config
 from agents.agent_decision import process_query
+from agents.booking_agent import orchestrator
+from fastapi import Header
 
 # Load configuration
 config = Config()
@@ -81,6 +83,10 @@ class SpeechRequest(BaseModel):
     text: str
     voice_id: str = "EXAMPLE_VOICE_ID"  # Default voice ID
 
+class AIChatRequest(BaseModel):
+    session_id: str
+    message: str
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     """Serve the main HTML page"""
@@ -103,7 +109,7 @@ def chat(
         session_id = str(uuid.uuid4())
     
     try:
-        response_data = process_query(request.query)
+        response_data = process_query(request.query, session_id=session_id)
         response_text = response_data['messages'][-1].content
         
         # Set session cookie
@@ -127,6 +133,30 @@ def chat(
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/ai/chat")
+async def api_ai_chat(
+    request: AIChatRequest,
+    authorization: Optional[str] = Header(None)
+):
+    """Receive NLP chat for medical appointment booking with session state management."""
+    jwt_token = None
+    if authorization:
+        if authorization.startswith("Bearer "):
+            jwt_token = authorization[7:]
+        else:
+            jwt_token = authorization
+
+    try:
+        response_data = await orchestrator.handle_message(
+            session_id=request.session_id,
+            message=request.message,
+            jwt_token=jwt_token
+        )
+        return response_data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/upload")
 async def upload_image(
@@ -171,7 +201,7 @@ async def upload_image(
     
     try:
         query = {"text": text, "image": file_path}
-        response_data = process_query(query)
+        response_data = process_query(query, session_id=session_id)
         response_text = response_data['messages'][-1].content
 
         # Set session cookie
@@ -223,7 +253,7 @@ def validate_medical_output(
         if comments:
             validation_query += f" Comments: {comments}"
         
-        response_data = process_query(validation_query)
+        response_data = process_query(validation_query, session_id=session_id)
 
         if validation_result.lower() == 'yes':
             return {
